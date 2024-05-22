@@ -1,4 +1,7 @@
-﻿using OpenAI;
+﻿// This code is licensed under MIT. Do whatever.
+// It is demo code, and as such not intended to be secure, correct for all inputs, or work much beyond showing off something cool.
+
+using OpenAI;
 using LibGit2Sharp;
 using OpenAI.ObjectModels;
 using OpenAI.ObjectModels.RequestModels;
@@ -7,48 +10,78 @@ using System.Text;
 using System.Text.Json;
 using OpenAI.ObjectModels.SharedModels;
 
+var DefaultSerializerOptions = new JsonSerializerOptions() { WriteIndented = true };
 string chatLogFilename = Path.Combine($"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}", "CapGpt", "chatlog.json");
 var cmdLine = Environment.GetCommandLineArgs()[1..];
 
+// First we check if any options are present.
+// Reset allows the user to easily clear the message log, and is used if ChatGPT becomes unresponsive.
 if(cmdLine is ["--reset"])
 {
     Console.WriteLine(RestartSession());
-    return;
+    return 0;
 }
 if(cmdLine is ["--help"])
 {
     Console.WriteLine("""
     Usage: gitgpt <options> [message]
     Options:
-      --help    Shows this message
+      --help    Shows this help screen
       --reset   Resets the chat session. Use this if ChatGPT refuses to respond, or execute commands.
     """);
-    return;
+    return 0;
 }
 
+// We create a cancellation token that is triggered in the event that the user presses ctrl+c
 CancellationTokenSource cancel = new();
-Console.CancelKeyPress += (_, _) => cancel.Cancel();
+Console.CancelKeyPress += (_, ev) =>
+{
+    cancel.Cancel();
+    ev.Cancel = true;
+};
 
+// Convenience function to get current time.
 static DateTimeOffset Now() => TimeProvider.System.GetLocalNow();
 
-var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions {  ApiKey = "apikey here", DefaultModelId = Models.Gpt_4o });
+// Replace exception with API key please. In a non-toy application this would be configurable.
+static string GetApiKey() => throw new NotImplementedException("I ran GitGPT and all I got was this lousy exception. Update the GetApiKey function to not cause a crash, please.");
 
+// Create the OpenAI service. We default to GPT 4o, which is at the time of writing the newest version.
+var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions {  ApiKey = GetApiKey(), DefaultModelId = Models.Gpt_4o });
+
+// First thing we do is fetch old messages.
 List<ChatMessage> chatMessages = await ReadChatLog();
+
+// Except if the command line is switches, we just want a single command line.
 var cmd = string.Join(" ", cmdLine);
 
+// This variable is used to determine if Save should do anything or not. If the session is restarted, then saving would write back all the deleted messages again.
 bool sessionRestarted = false;
 
-if(cmd is not {Length: > 0})
+// There's no message to send. Just quit.
+if(cmd is not { Length: > 0 })
 {
-    return;
+    return 1;
 }
 
 AddUserMessage(cmd);
-await DoCompletion();
+try
+{
+    await DoCompletion();
+}
+// If the user presses Ctrl+C then TaskCancelled or OperationCancelled will be thrown. TaskCancelledException inherits from OperationCancelledException so this will catch both.
+catch(OperationCanceledException)
+{
+    Console.WriteLine("Cancelled by user.");
+}
+// We're done. Save all messages in the log.
 await SaveChatLog(chatMessages);
+
+return 0;
 
 async Task<List<ChatMessage>> ReadChatLog()
 {
+    // We unconditionally create the directory. This function is no-op if the directory already exists.
     Directory.CreateDirectory(Path.GetDirectoryName(chatLogFilename) ?? throw new InvalidOperationException());
     using var fs = File.Open(chatLogFilename, FileMode.OpenOrCreate);
     if(fs.Length == 0)
@@ -62,11 +95,10 @@ async Task SaveChatLog(List<ChatMessage> messages)
 {
     if(sessionRestarted)
     {
-        // The assistant decided to restart the session. No point in saving anything.
         return;
     }
     using var fs = File.Open(chatLogFilename, FileMode.Create);
-    await JsonSerializer.SerializeAsync(fs, messages, new JsonSerializerOptions() { WriteIndented = true });
+    await JsonSerializer.SerializeAsync(fs, messages, DefaultSerializerOptions);
 }
 
 ToolDefinition DefineRestartTool()
@@ -83,8 +115,8 @@ ToolDefinition DefineGitStatusTool()
 
 ToolDefinition DefineGitStageTool() => DefineFunctionCall(nameof(GitStage), "Stages files for commit.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to stage. This can use a glob syntax."))));
 
-ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", b =>
-     b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
+ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", 
+    b => b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
 
 ToolDefinition DefineFunctionCall(string name, string? description, Action<FunctionDefinitionBuilder> action)
 {
@@ -95,23 +127,31 @@ ToolDefinition DefineFunctionCall(string name, string? description, Action<Funct
 
 async Task DoCompletion()
 {
-    var completion = await service.ChatCompletion.CreateCompletion(new ChatCompletionCreateRequest() { Messages = chatMessages, Temperature = 0.8f, Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitCommitTool()] }, cancellationToken: cancel.Token);
+    var request = new ChatCompletionCreateRequest
+    {
+         Messages = chatMessages,
+         Temperature = 0.8f, // Temperature decides "creativity" of output. Temperature of 0 makes output deterministic.
+         Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitCommitTool()]
+    };
 
-    if(completion is not { Choices.Count : > 0})
+    var completion = await service.ChatCompletion.CreateCompletion(request, cancellationToken: cancel.Token);
+
+    // If there were no choices from ChatGPT then nothing to do.
+    if(completion is not { Choices.Count : > 0 })
     {
         return;
     }
 
+    // We just pick the first one.
     var choice = completion.Choices[0];
 
-    chatMessages.Add(ChatMessage.FromAssistant(choice.Message?.Content ?? "", toolCalls: choice.Message!.ToolCalls));
+    chatMessages.Add(ChatMessage.FromAssistant(choice.Message.Content ?? "", toolCalls: choice.Message.ToolCalls));
 
-    if(choice.Message is {Content: { Length: > 0} message })
+    if(choice.Message is {Content: { Length: > 0 } message })
     {
-        chatMessages.Add(ChatMessage.FromAssistant(message, toolCalls: choice.Message.ToolCalls));
         Console.WriteLine(message);
     }
-    if(choice.Message.ToolCalls is { Count: > 0} tools)
+    if(choice.Message.ToolCalls is { Count: > 0 } tools)
     {
         foreach(var tool in tools)
         {
@@ -119,6 +159,7 @@ async Task DoCompletion()
             chatMessages.Add(ChatMessage.FromTool(toolCallResponse, tool.Id!));
         }
 
+        // The agent might not be finished, and it might not have produced a message, so we'll run it back to ChatGPT to see if it wants to do more, or write something.
         await DoCompletion();
     }
 }
@@ -200,7 +241,7 @@ string GitStatus()
         }
     }
 
-    if(status.Missing?.ToList() is {Count: > 0 } deleted)
+    if(status.Missing?.ToList() is { Count: > 0 } deleted)
     {
         response.AppendLine("Deleted:");
         foreach(var item in deleted)
@@ -209,7 +250,7 @@ string GitStatus()
         }
     }
 
-    if(status.Untracked?.ToList() is { Count: > 0} untracked)
+    if(status.Untracked?.ToList() is { Count: > 0 } untracked)
     {
         response.AppendLine($"Untracked:");
         foreach(var item in untracked)
@@ -228,7 +269,7 @@ string RestartSession()
     {
         File.Delete(chatLogFilename);
     }
-    catch(FileNotFoundException)
+    catch(DirectoryNotFoundException)
     {
         // Don't care.
     }
@@ -244,7 +285,7 @@ List<ChatMessage> StartNewChat()
 {
     string prompt = $"""
         You are a user interface tool for Git called CapGit-{Environment.MachineName}. You can do a small amount of tasks related to Git.
-        The user is named {Environment.UserName}, and the current date is {Now():yyyy-MM-dd}, the time is {Now():HH:mm}. The messages from the user will start with the current date and time in ISO 8601 format.
+        The user is named {Environment.UserName}, and the current date is {Now():yyyy-MM-dd}, the time is {Now():HH:mm}. The messages from the user will start with the date and time in ISO 8601 format for when the message was sent.
         """;
 
     return [ChatMessage.FromSystem(prompt)];
