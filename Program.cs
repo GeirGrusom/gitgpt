@@ -3,7 +3,28 @@ using LibGit2Sharp;
 using OpenAI.ObjectModels;
 using OpenAI.ObjectModels.RequestModels;
 using OpenAI.Builders;
+using System.Text;
+using System.Text.Json;
 using OpenAI.ObjectModels.SharedModels;
+
+string chatLogFilename = Path.Combine($"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}", "CapGpt", "chatlog.json");
+var cmdLine = Environment.GetCommandLineArgs()[1..];
+
+if(cmdLine is ["--reset"])
+{
+    Console.WriteLine(RestartSession());
+    return;
+}
+if(cmdLine is ["--help"])
+{
+    Console.WriteLine("""
+    Usage: gitgpt <options> [message]
+    Options:
+      --help    Shows this message
+      --reset   Resets the chat session. Use this if ChatGPT refuses to respond, or execute commands.
+    """);
+    return;
+}
 
 CancellationTokenSource cancel = new();
 Console.CancelKeyPress += (_, _) => cancel.Cancel();
@@ -12,9 +33,8 @@ static DateTimeOffset Now() => TimeProvider.System.GetLocalNow();
 
 var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions {  ApiKey = "apikey here", DefaultModelId = Models.Gpt_4o });
 
-string chatLogFilename = Path.Combine($"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}", "CapGpt", "chatlog.json");
 List<ChatMessage> chatMessages = await ReadChatLog();
-var cmd = Environment.CommandLine;
+var cmd = string.Join(" ", cmdLine);
 
 bool sessionRestarted = false;
 
@@ -35,7 +55,7 @@ async Task<List<ChatMessage>> ReadChatLog()
     {
         return StartNewChat();
     }
-    return await System.Text.Json.JsonSerializer.DeserializeAsync<List<ChatMessage>>(fs) ?? [];
+    return await JsonSerializer.DeserializeAsync<List<ChatMessage>>(fs) ?? [];
 }
 
 async Task SaveChatLog(List<ChatMessage> messages)
@@ -46,7 +66,7 @@ async Task SaveChatLog(List<ChatMessage> messages)
         return;
     }
     using var fs = File.Open(chatLogFilename, FileMode.Create);
-    await System.Text.Json.JsonSerializer.SerializeAsync(fs, messages);
+    await JsonSerializer.SerializeAsync(fs, messages, new JsonSerializerOptions() { WriteIndented = true });
 }
 
 ToolDefinition DefineRestartTool()
@@ -55,9 +75,27 @@ ToolDefinition DefineRestartTool()
     return ToolDefinition.DefineFunction(fun.Build());
 }
 
+ToolDefinition DefineGitStatusTool()
+{
+    var fun = new FunctionDefinitionBuilder(nameof(GitStatus), "Get the current status of git in the current directory.");
+    return ToolDefinition.DefineFunction(fun.Build());
+}
+
+ToolDefinition DefineGitStageTool() => DefineFunctionCall(nameof(GitStage), "Stages files for commit.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to stage. This can use a glob syntax."))));
+
+ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", b =>
+     b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
+
+ToolDefinition DefineFunctionCall(string name, string? description, Action<FunctionDefinitionBuilder> action)
+{
+    var builder  = new FunctionDefinitionBuilder(name, description);
+    action(builder);
+    return ToolDefinition.DefineFunction(builder.Build());
+}
+
 async Task DoCompletion()
 {
-    var completion = await service.ChatCompletion.CreateCompletion(new ChatCompletionCreateRequest() { Messages = chatMessages, Temperature = 0.8f, Tools = [DefineRestartTool()] }, cancellationToken: cancel.Token);
+    var completion = await service.ChatCompletion.CreateCompletion(new ChatCompletionCreateRequest() { Messages = chatMessages, Temperature = 0.8f, Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitCommitTool()] }, cancellationToken: cancel.Token);
 
     if(completion is not { Choices.Count : > 0})
     {
@@ -66,9 +104,11 @@ async Task DoCompletion()
 
     var choice = completion.Choices[0];
 
+    chatMessages.Add(ChatMessage.FromAssistant(choice.Message?.Content ?? "", toolCalls: choice.Message!.ToolCalls));
+
     if(choice.Message is {Content: { Length: > 0} message })
     {
-        chatMessages.Add(ChatMessage.FromAssistant(message));
+        chatMessages.Add(ChatMessage.FromAssistant(message, toolCalls: choice.Message.ToolCalls));
         Console.WriteLine(message);
     }
     if(choice.Message.ToolCalls is { Count: > 0} tools)
@@ -77,7 +117,6 @@ async Task DoCompletion()
         {
             var toolCallResponse = ProcessTool(tool);
             chatMessages.Add(ChatMessage.FromTool(toolCallResponse, tool.Id!));
-            Console.WriteLine($"{tool.FunctionCall!.Name}: {toolCallResponse}");
         }
 
         await DoCompletion();
@@ -86,11 +125,100 @@ async Task DoCompletion()
 
 string ProcessTool(ToolCall tool)
 {
-    if(tool is { FunctionCall.Name: nameof(RestartSession) })
+    return tool switch
     {
-        return RestartSession();
+        { FunctionCall.Name: nameof(RestartSession) } => RestartSession(),
+        { FunctionCall.Name: nameof(GitStatus)} => GitStatus(),
+        { FunctionCall.Name: nameof(GitStage)} => GitStage([..((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
+        { FunctionCall.Name: nameof(GitCommit)} => GitCommit(tool.FunctionCall.ParseArguments()["commitMessage"].ToString()!),
+        _ => $"{tool.FunctionCall!.Name} could not be found."
+    };
+}
+
+string GitCommit(string commitMessage)
+{
+    var result = new StringBuilder();
+    var repo = new Repository(Environment.CurrentDirectory);
+    var signature = repo.Config.BuildSignature(DateTimeOffset.UtcNow);
+    var commit = repo.Commit(commitMessage, signature, signature, new CommitOptions() { AllowEmptyCommit = false });
+    return $"Commit {commit.Sha} created for author {commit.Author.Name}.";
+}
+
+string GitStage(string[] files)
+{
+    var result = new StringBuilder();
+    var repo = new Repository(Environment.CurrentDirectory);
+
+    Commands.Stage(repo, files);
+
+    var status = repo.RetrieveStatus(new StatusOptions() 
+    {
+        IncludeUntracked = false,
+        DetectRenamesInIndex = true,
+        DetectRenamesInWorkDir = true,
+        Show = StatusShowOption.IndexAndWorkDir
+    });
+
+    result.AppendLine("Staged files:");
+    foreach(var item in status.Staged)
+    {
+        result.AppendLine($"- {item.FilePath}");
     }
-    return "(Tool could not be found)";
+
+    return result.ToString();
+}
+
+string GitStatus()
+{
+    StringBuilder response = new();
+    var repo = new Repository(Environment.CurrentDirectory);
+    
+    response.AppendLine($"Current branch: {repo.Head.CanonicalName}");
+
+    var status = repo.RetrieveStatus(new StatusOptions() {
+        IncludeUntracked = true,
+        DetectRenamesInIndex = true,
+        DetectRenamesInWorkDir = true,
+        Show = StatusShowOption.IndexAndWorkDir
+    });
+
+    if(status.Staged?.ToList() is  { Count: > 0 } entries)
+    {
+        response.AppendLine("Staged for commit:");
+        foreach(var item in entries)
+        {
+            response.AppendLine($" - {item.FilePath}");
+        }
+    }
+
+    if(status.Modified?.ToList() is  { Count: > 0 } altered)
+    {
+        response.AppendLine("Modified:");
+        foreach(var item in altered)
+        {
+            response.AppendLine($" - {item.FilePath}");
+        }
+    }
+
+    if(status.Missing?.ToList() is {Count: > 0 } deleted)
+    {
+        response.AppendLine("Deleted:");
+        foreach(var item in deleted)
+        {
+            response.AppendLine($" - {item.FilePath}");
+        }
+    }
+
+    if(status.Untracked?.ToList() is { Count: > 0} untracked)
+    {
+        response.AppendLine($"Untracked:");
+        foreach(var item in untracked)
+        {
+            response.AppendLine($" - {item.FilePath}");
+        }
+    }
+
+    return response.ToString();
 }
 
 string RestartSession()
