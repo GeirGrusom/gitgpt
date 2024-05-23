@@ -1,29 +1,28 @@
 ﻿using OpenAI.ObjectModels.RequestModels;
 using System.Collections.Immutable;
+using System.Diagnostics.Contracts;
 using System.Text.Json;
 
 namespace gitgpt;
 
-public sealed class ChatLog(string filename, TimeProvider timeProvider)
+public sealed record ChatLog(ImmutableList<ChatMessage> ChatMessages)
 {
     private static readonly JsonSerializerOptions defaultSerializerOptions = new () { WriteIndented = true };
 
-    private ImmutableList<ChatMessage> chatMessages = [];
-
-    public ImmutableList<ChatMessage> ChatMessages => chatMessages;
-
-    public void AddUserMessage(string message)
+    [Pure]
+    public ChatLog AddUserMessage(string message, TimeProvider timeProvider)
     {
         var now = timeProvider.GetLocalNow();
-        chatMessages = chatMessages.Add(ChatMessage.FromUser($"[{now:yyyy-MM-ddTHH:mm:ss}]: {message}"));
+        return new ChatLog(ChatMessages.Add(ChatMessage.FromUser($"[{now:yyyy-MM-ddTHH:mm:ss}]: {message}")));
     }
 
-    public void Add(ChatMessage message)
+    [Pure]
+    public ChatLog Add(ChatMessage message)
     {
-        chatMessages = chatMessages.Add(message);
+        return new ChatLog(ChatMessages.Add(message));
     }
 
-    public void Delete()
+    public static void Delete(string filename)
     {
         try
         {
@@ -35,24 +34,26 @@ public sealed class ChatLog(string filename, TimeProvider timeProvider)
         }
     }
 
-    public async Task ReadChatLog()
+    [Pure]
+    public static async Task<ChatLog> ReadChatLogAsync(string filename, TimeProvider timeProvider)
     {
         // We unconditionally create the directory. This function is no-op if the directory already exists.
         Directory.CreateDirectory(Path.GetDirectoryName(filename) ?? throw new InvalidOperationException());
         using var fs = File.Open(filename, FileMode.OpenOrCreate);
         if (fs.Length == 0)
         {
-            chatMessages = StartNewChat(timeProvider);
+            return new ChatLog(StartNewChat(timeProvider));
         }
-        chatMessages = await JsonSerializer.DeserializeAsync<ImmutableList<ChatMessage>>(fs) ?? [];
+        return new ChatLog(await JsonSerializer.DeserializeAsync<ImmutableList<ChatMessage>>(fs) ?? []);
     }
 
-    public async Task SaveChatLog()
+    public async Task SaveChatLogAsync(string filename)
     {
         using var fs = File.Open(filename, FileMode.Create);
-        await JsonSerializer.SerializeAsync(fs, chatMessages, defaultSerializerOptions);
+        await JsonSerializer.SerializeAsync(fs, ChatMessages, defaultSerializerOptions);
     }
 
+    [Pure]
     private static ImmutableList<ChatMessage> StartNewChat(TimeProvider timeProvider)
     {
         var now = timeProvider.GetLocalNow();

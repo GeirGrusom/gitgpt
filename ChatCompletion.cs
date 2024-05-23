@@ -28,7 +28,7 @@ public sealed class ChatCompletion(string apiKey)
         return ToolDefinition.DefineFunction(builder.Build());
     }
 
-    public async Task DoCompletion(ChatLog chatLog, CancellationToken cancellationToken)
+    public async Task<ChatLog> DoCompletionAsync(ChatLog chatLog, CancellationToken cancellationToken)
     {
         var request = new ChatCompletionCreateRequest
         {
@@ -42,13 +42,13 @@ public sealed class ChatCompletion(string apiKey)
         // If there were no choices from ChatGPT then nothing to do.
         if (completion is not { Choices.Count: > 0 })
         {
-            return;
+            return chatLog;
         }
 
         // We just pick the first one.
         var choice = completion.Choices[0];
 
-        chatLog.Add(ChatMessage.FromAssistant(choice.Message.Content ?? "", toolCalls: choice.Message.ToolCalls));
+        chatLog = chatLog.Add(ChatMessage.FromAssistant(choice.Message.Content ?? "", toolCalls: choice.Message.ToolCalls));
 
         if (choice.Message is { Content: { Length: > 0 } message })
         {
@@ -58,27 +58,28 @@ public sealed class ChatCompletion(string apiKey)
         {
             foreach (var (func, id) in tools.Where(t => t.FunctionCall is { }).Select(t => (func: t.FunctionCall!, id: t.Id!)))
             {
-                var toolCallResponse = ProcessTool(func);
-                chatLog.Add(ChatMessage.FromTool(toolCallResponse, id));
+                var toolCallResponse = ProcessFunctionCall(func);
+                chatLog = chatLog.Add(ChatMessage.FromTool(toolCallResponse, id));
             }
 
             // The agent might not be finished, and it might not have produced a message, so we'll run it back to ChatGPT to see if it wants to do more, or write something.
-            await DoCompletion(chatLog, cancellationToken);
+            return await DoCompletionAsync(chatLog, cancellationToken);
         }
+        return chatLog;
     }
 
-    private string ProcessTool(FunctionCall tool)
+    private string ProcessFunctionCall(FunctionCall func)
     {
-        var args = tool.ParseArguments();
+        var args = func.ParseArguments();
 
-        return tool switch
+        return func switch
         {
             { Name: nameof(RestartSession) } => RestartSession(),
             { Name: nameof(GitStatus) } => GitStatus(),
             { Name: nameof(GitStage) } => GitStage([.. ((JsonElement)args["files"]).EnumerateArray().Select(x => x!.ToString())]),
             { Name: nameof(GitUnstage) } => GitUnstage([.. ((JsonElement)args["files"]).EnumerateArray().Select(x => x!.ToString())]),
             { Name: nameof(GitCommit) } => GitCommit(args["commitMessage"].ToString()!),
-            _ => $"{tool.Name} could not be found."
+            _ => $"{func.Name} could not be found."
         };
     }
 
