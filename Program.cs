@@ -3,7 +3,7 @@
 
 using gitgpt;
 
-string chatLogFilename = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitGpt", "chatlog.json");
+var chatLogFilename = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitGpt", "chatlog.json");
 
 // First we check if any options are present.
 // Reset allows the user to easily clear the message log, and is used if ChatGPT becomes unresponsive.
@@ -43,7 +43,7 @@ Console.CancelKeyPress += (_, ev) =>
 static string GetApiKey() => throw new NotImplementedException("I ran GitGPT and all I got was this lousy exception. Update the GetApiKey function to not cause a crash, please.");
 
 // Except if the command line is switches, we just want a single command line.
-var cmd = string.Join(" ", args);
+var cmd = string.Join(' ', args);
 
 // There's no message to send. Just quit.
 if (cmd is not { Length: > 0 })
@@ -66,13 +66,13 @@ catch (OperationCanceledException)
     Console.WriteLine("Cancelled by user.");
 }
 
-// We're done. Save all messages in the log.
 if (completion.ResetRequested)
 {
     chatLog.Delete();
 }
 else
 {
+    // We're done. Save all messages in the log.
     await chatLog.SaveChatLog();
 }
 

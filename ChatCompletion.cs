@@ -56,10 +56,10 @@ public sealed class ChatCompletion(string apiKey)
         }
         if (choice.Message.ToolCalls is { Count: > 0 } tools)
         {
-            foreach (var tool in tools)
+            foreach (var (func, id) in tools.Where(t => t.FunctionCall is { }).Select(t => (func: t.FunctionCall!, id: t.Id!)))
             {
-                var toolCallResponse = ProcessTool(tool);
-                chatLog.Add(ChatMessage.FromTool(toolCallResponse, tool.Id!));
+                var toolCallResponse = ProcessTool(func);
+                chatLog.Add(ChatMessage.FromTool(toolCallResponse, id));
             }
 
             // The agent might not be finished, and it might not have produced a message, so we'll run it back to ChatGPT to see if it wants to do more, or write something.
@@ -67,16 +67,18 @@ public sealed class ChatCompletion(string apiKey)
         }
     }
 
-    private string ProcessTool(ToolCall tool)
+    private string ProcessTool(FunctionCall tool)
     {
+        var args = tool.ParseArguments();
+
         return tool switch
         {
-            { FunctionCall.Name: nameof(RestartSession) } => RestartSession(),
-            { FunctionCall.Name: nameof(GitStatus) } => GitStatus(),
-            { FunctionCall.Name: nameof(GitStage) } => GitStage([.. ((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
-            { FunctionCall.Name: nameof(GitUnstage) } => GitUnstage([.. ((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
-            { FunctionCall.Name: nameof(GitCommit) } => GitCommit(tool.FunctionCall.ParseArguments()["commitMessage"].ToString()!),
-            _ => $"{tool.FunctionCall!.Name} could not be found."
+            { Name: nameof(RestartSession) } => RestartSession(),
+            { Name: nameof(GitStatus) } => GitStatus(),
+            { Name: nameof(GitStage) } => GitStage([.. ((JsonElement)args["files"]).EnumerateArray().Select(x => x!.ToString())]),
+            { Name: nameof(GitUnstage) } => GitUnstage([.. ((JsonElement)args["files"]).EnumerateArray().Select(x => x!.ToString())]),
+            { Name: nameof(GitCommit) } => GitCommit(args["commitMessage"].ToString()!),
+            _ => $"{tool.Name} could not be found."
         };
     }
 
