@@ -11,16 +11,16 @@ using System.Text.Json;
 using OpenAI.ObjectModels.SharedModels;
 
 var DefaultSerializerOptions = new JsonSerializerOptions() { WriteIndented = true };
-string chatLogFilename = Path.Combine($"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}", "CapGpt", "chatlog.json");
+string chatLogFilename = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "GitGpt", "chatlog.json");
 
 // First we check if any options are present.
 // Reset allows the user to easily clear the message log, and is used if ChatGPT becomes unresponsive.
-if(args is ["--reset"])
+if (args is ["--reset"])
 {
     Console.WriteLine(RestartSession());
     return 0;
 }
-if(args is ["--help"])
+if (args is ["--help"] or [])
 {
     Console.WriteLine("""
     Usage: gitgpt <options> [message]
@@ -46,7 +46,7 @@ static DateTimeOffset Now() => TimeProvider.System.GetLocalNow();
 static string GetApiKey() => throw new NotImplementedException("I ran GitGPT and all I got was this lousy exception. Update the GetApiKey function to not cause a crash, please.");
 
 // Create the OpenAI service. We default to GPT 4o, which is at the time of writing the newest version.
-var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions {  ApiKey = GetApiKey(), DefaultModelId = Models.Gpt_4o });
+var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions { ApiKey = GetApiKey(), DefaultModelId = Models.Gpt_4o });
 
 // First thing we do is fetch old messages.
 List<ChatMessage> chatMessages = await ReadChatLog();
@@ -58,7 +58,7 @@ var cmd = string.Join(" ", args);
 bool sessionRestarted = false;
 
 // There's no message to send. Just quit.
-if(cmd is not { Length: > 0 })
+if (cmd is not { Length: > 0 })
 {
     return 1;
 }
@@ -69,7 +69,7 @@ try
     await DoCompletion();
 }
 // If the user presses Ctrl+C then TaskCancelled or OperationCancelled will be thrown. TaskCancelledException inherits from OperationCancelledException so this will catch both.
-catch(OperationCanceledException)
+catch (OperationCanceledException)
 {
     Console.WriteLine("Cancelled by user.");
 }
@@ -83,7 +83,7 @@ async Task<List<ChatMessage>> ReadChatLog()
     // We unconditionally create the directory. This function is no-op if the directory already exists.
     Directory.CreateDirectory(Path.GetDirectoryName(chatLogFilename) ?? throw new InvalidOperationException());
     using var fs = File.Open(chatLogFilename, FileMode.OpenOrCreate);
-    if(fs.Length == 0)
+    if (fs.Length == 0)
     {
         return StartNewChat();
     }
@@ -92,7 +92,7 @@ async Task<List<ChatMessage>> ReadChatLog()
 
 async Task SaveChatLog(List<ChatMessage> messages)
 {
-    if(sessionRestarted)
+    if (sessionRestarted)
     {
         return;
     }
@@ -100,29 +100,16 @@ async Task SaveChatLog(List<ChatMessage> messages)
     await JsonSerializer.SerializeAsync(fs, messages, DefaultSerializerOptions);
 }
 
-ToolDefinition DefineRestartTool()
-{
-    var fun = new FunctionDefinitionBuilder(nameof(RestartSession), "Restarts the chat session.");
-    return ToolDefinition.DefineFunction(fun.Build());
-}
-
-ToolDefinition DefineGitStatusTool()
-{
-    var fun = new FunctionDefinitionBuilder(nameof(GitStatus), "Get the current status of git in the current directory.");
-    return ToolDefinition.DefineFunction(fun.Build());
-}
-
+ToolDefinition DefineRestartTool() => DefineFunctionCall(nameof(RestartSession), "Restarts the chat session.");
+ToolDefinition DefineGitStatusTool() => DefineFunctionCall(nameof(GitStatus), "Get the current status of git in the current directory.");
 ToolDefinition DefineGitStageTool() => DefineFunctionCall(nameof(GitStage), "Stages files for commit.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to stage. This can use a glob syntax."))));
 ToolDefinition DefineGitUnstageTool() => DefineFunctionCall(nameof(GitUnstage), "Unstages files.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to unstage. This can use a glob syntax."))));
-ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", 
-    b => b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
+ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", b => b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
 
-//ToolDefinition DefineUnstageTool() => DefineFunctionCall(nameo)
-
-ToolDefinition DefineFunctionCall(string name, string? description, Action<FunctionDefinitionBuilder> action)
+ToolDefinition DefineFunctionCall(string name, string? description, Action<FunctionDefinitionBuilder>? action = null)
 {
-    var builder  = new FunctionDefinitionBuilder(name, description);
-    action(builder);
+    var builder = new FunctionDefinitionBuilder(name, description);
+    action?.Invoke(builder);
     return ToolDefinition.DefineFunction(builder.Build());
 }
 
@@ -130,15 +117,15 @@ async Task DoCompletion()
 {
     var request = new ChatCompletionCreateRequest
     {
-         Messages = chatMessages,
-         Temperature = 0.8f, // Temperature decides "creativity" of output. Temperature of 0 makes output deterministic.
-         Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitUnstageTool(), DefineGitCommitTool()]
+        Messages = chatMessages,
+        Temperature = 0.8f, // Temperature decides "creativity" of output. Temperature of 0 makes output deterministic.
+        Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitUnstageTool(), DefineGitCommitTool()]
     };
 
     var completion = await service.ChatCompletion.CreateCompletion(request, cancellationToken: cancel.Token);
 
     // If there were no choices from ChatGPT then nothing to do.
-    if(completion is not { Choices.Count : > 0 })
+    if (completion is not { Choices.Count: > 0 })
     {
         return;
     }
@@ -148,13 +135,13 @@ async Task DoCompletion()
 
     chatMessages.Add(ChatMessage.FromAssistant(choice.Message.Content ?? "", toolCalls: choice.Message.ToolCalls));
 
-    if(choice.Message is {Content: { Length: > 0 } message })
+    if (choice.Message is { Content: { Length: > 0 } message })
     {
         Console.WriteLine(message);
     }
-    if(choice.Message.ToolCalls is { Count: > 0 } tools)
+    if (choice.Message.ToolCalls is { Count: > 0 } tools)
     {
-        foreach(var tool in tools)
+        foreach (var tool in tools)
         {
             var toolCallResponse = ProcessTool(tool);
             chatMessages.Add(ChatMessage.FromTool(toolCallResponse, tool.Id!));
@@ -170,10 +157,10 @@ string ProcessTool(ToolCall tool)
     return tool switch
     {
         { FunctionCall.Name: nameof(RestartSession) } => RestartSession(),
-        { FunctionCall.Name: nameof(GitStatus)} => GitStatus(),
-        { FunctionCall.Name: nameof(GitStage)} => GitStage([..((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
+        { FunctionCall.Name: nameof(GitStatus) } => GitStatus(),
+        { FunctionCall.Name: nameof(GitStage) } => GitStage([.. ((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
         { FunctionCall.Name: nameof(GitUnstage) } => GitUnstage([.. ((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
-        { FunctionCall.Name: nameof(GitCommit)} => GitCommit(tool.FunctionCall.ParseArguments()["commitMessage"].ToString()!),
+        { FunctionCall.Name: nameof(GitCommit) } => GitCommit(tool.FunctionCall.ParseArguments()["commitMessage"].ToString()!),
         _ => $"{tool.FunctionCall!.Name} could not be found."
     };
 }
@@ -194,7 +181,7 @@ string GitStage(string[] files)
 
     Commands.Stage(repo, files);
 
-    var status = repo.RetrieveStatus(new StatusOptions() 
+    var status = repo.RetrieveStatus(new StatusOptions()
     {
         IncludeUntracked = false,
         DetectRenamesInIndex = true,
@@ -203,7 +190,7 @@ string GitStage(string[] files)
     });
 
     result.AppendLine("Staged files:");
-    foreach(var item in status.Staged)
+    foreach (var item in status.Staged)
     {
         result.AppendLine($"- {item.FilePath}");
     }
@@ -239,47 +226,48 @@ string GitStatus()
 {
     StringBuilder response = new();
     var repo = new Repository(Environment.CurrentDirectory);
-    
+
     response.AppendLine($"Current branch: {repo.Head.CanonicalName}");
 
-    var status = repo.RetrieveStatus(new StatusOptions() {
+    var status = repo.RetrieveStatus(new StatusOptions()
+    {
         IncludeUntracked = true,
         DetectRenamesInIndex = true,
         DetectRenamesInWorkDir = true,
         Show = StatusShowOption.IndexAndWorkDir
     });
 
-    if(status.Staged?.ToList() is  { Count: > 0 } entries)
+    if (status.Staged?.ToList() is { Count: > 0 } entries)
     {
         response.AppendLine("Staged for commit:");
-        foreach(var item in entries)
+        foreach (var item in entries)
         {
             response.AppendLine($" - {item.FilePath}");
         }
     }
 
-    if(status.Modified?.ToList() is  { Count: > 0 } altered)
+    if (status.Modified?.ToList() is { Count: > 0 } altered)
     {
         response.AppendLine("Modified:");
-        foreach(var item in altered)
+        foreach (var item in altered)
         {
             response.AppendLine($" - {item.FilePath}");
         }
     }
 
-    if(status.Missing?.ToList() is { Count: > 0 } deleted)
+    if (status.Missing?.ToList() is { Count: > 0 } deleted)
     {
         response.AppendLine("Deleted:");
-        foreach(var item in deleted)
+        foreach (var item in deleted)
         {
             response.AppendLine($" - {item.FilePath}");
         }
     }
 
-    if(status.Untracked?.ToList() is { Count: > 0 } untracked)
+    if (status.Untracked?.ToList() is { Count: > 0 } untracked)
     {
         response.AppendLine($"Untracked:");
-        foreach(var item in untracked)
+        foreach (var item in untracked)
         {
             response.AppendLine($" - {item.FilePath}");
         }
@@ -295,7 +283,7 @@ string RestartSession()
     {
         File.Delete(chatLogFilename);
     }
-    catch(DirectoryNotFoundException)
+    catch (DirectoryNotFoundException)
     {
         // Don't care.
     }
