@@ -12,16 +12,15 @@ using OpenAI.ObjectModels.SharedModels;
 
 var DefaultSerializerOptions = new JsonSerializerOptions() { WriteIndented = true };
 string chatLogFilename = Path.Combine($"{Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData)}", "CapGpt", "chatlog.json");
-var cmdLine = Environment.GetCommandLineArgs()[1..];
 
 // First we check if any options are present.
 // Reset allows the user to easily clear the message log, and is used if ChatGPT becomes unresponsive.
-if(cmdLine is ["--reset"])
+if(args is ["--reset"])
 {
     Console.WriteLine(RestartSession());
     return 0;
 }
-if(cmdLine is ["--help"])
+if(args is ["--help"])
 {
     Console.WriteLine("""
     Usage: gitgpt <options> [message]
@@ -53,7 +52,7 @@ var service = new OpenAI.Managers.OpenAIService(new OpenAiOptions {  ApiKey = Ge
 List<ChatMessage> chatMessages = await ReadChatLog();
 
 // Except if the command line is switches, we just want a single command line.
-var cmd = string.Join(" ", cmdLine);
+var cmd = string.Join(" ", args);
 
 // This variable is used to determine if Save should do anything or not. If the session is restarted, then saving would write back all the deleted messages again.
 bool sessionRestarted = false;
@@ -114,9 +113,11 @@ ToolDefinition DefineGitStatusTool()
 }
 
 ToolDefinition DefineGitStageTool() => DefineFunctionCall(nameof(GitStage), "Stages files for commit.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to stage. This can use a glob syntax."))));
-
+ToolDefinition DefineGitUnstageTool() => DefineFunctionCall(nameof(GitUnstage), "Unstages files.", b => b.AddParameter("files", PropertyDefinition.DefineArray(PropertyDefinition.DefineString("Name of file to unstage. This can use a glob syntax."))));
 ToolDefinition DefineGitCommitTool() => DefineFunctionCall(nameof(GitCommit), "Commits staged changes with the specified commit message.", 
     b => b.AddParameter("commitMessage", PropertyDefinition.DefineString("The commit message to use.")));
+
+//ToolDefinition DefineUnstageTool() => DefineFunctionCall(nameo)
 
 ToolDefinition DefineFunctionCall(string name, string? description, Action<FunctionDefinitionBuilder> action)
 {
@@ -131,7 +132,7 @@ async Task DoCompletion()
     {
          Messages = chatMessages,
          Temperature = 0.8f, // Temperature decides "creativity" of output. Temperature of 0 makes output deterministic.
-         Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitCommitTool()]
+         Tools = [DefineRestartTool(), DefineGitStatusTool(), DefineGitStageTool(), DefineGitUnstageTool(), DefineGitCommitTool()]
     };
 
     var completion = await service.ChatCompletion.CreateCompletion(request, cancellationToken: cancel.Token);
@@ -171,6 +172,7 @@ string ProcessTool(ToolCall tool)
         { FunctionCall.Name: nameof(RestartSession) } => RestartSession(),
         { FunctionCall.Name: nameof(GitStatus)} => GitStatus(),
         { FunctionCall.Name: nameof(GitStage)} => GitStage([..((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
+        { FunctionCall.Name: nameof(GitUnstage) } => GitUnstage([.. ((JsonElement)tool.FunctionCall.ParseArguments()["files"]).EnumerateArray().Select(x => x!.ToString())]),
         { FunctionCall.Name: nameof(GitCommit)} => GitCommit(tool.FunctionCall.ParseArguments()["commitMessage"].ToString()!),
         _ => $"{tool.FunctionCall!.Name} could not be found."
     };
@@ -202,6 +204,30 @@ string GitStage(string[] files)
 
     result.AppendLine("Staged files:");
     foreach(var item in status.Staged)
+    {
+        result.AppendLine($"- {item.FilePath}");
+    }
+
+    return result.ToString();
+}
+
+string GitUnstage(string[] files)
+{
+    var result = new StringBuilder();
+    var repo = new Repository(Environment.CurrentDirectory);
+
+    Commands.Unstage(repo, files);
+
+    var status = repo.RetrieveStatus(new StatusOptions()
+    {
+        IncludeUntracked = false,
+        DetectRenamesInIndex = true,
+        DetectRenamesInWorkDir = true,
+        Show = StatusShowOption.IndexAndWorkDir
+    });
+
+    result.AppendLine("Staged files:");
+    foreach (var item in status.Staged)
     {
         result.AppendLine($"- {item.FilePath}");
     }
